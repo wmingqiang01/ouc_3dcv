@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/camera_calibration.iml" filepath="$PROJECT_DIR$/.idea/camera_calibration.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/ouc-3dcv.iml" filepath="$PROJECT_DIR$/.idea/ouc-3dcv.iml" />
     </modules>
   </component>
 </project>
