@@ -6,9 +6,9 @@ import glob
 #criteria:角点精准化迭代过程的终止条件
 criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
 #棋盘格模板规格
-len = 18#黑白格长度
-w = 6
-h = 13
+len = 30#黑白格长度
+w = 12
+h = 9
 # 世界坐标系中的棋盘格点,例如(0,0,0), (1,0,0), (2,0,0) ....,(8,5,0)，去掉Z坐标，记为二维矩阵
 world_point = np.zeros((w*h, 3), np.float32)#初始化一个6*13行3列的矩阵，类型为float
 
@@ -83,5 +83,5 @@ f = open('畸变系数.txt', 'w+')
 f.write('畸变系数:\n'+str(dist)+'\n')
 f.close()
 print('结果输出完毕')
-np.savez('data.npz', mtx= mtx, dist= dist,rvecs=rvecs,tvecs=tvecs)
+np.savez('left_data.npz', mtx= mtx, dist= dist,rvecs=rvecs,tvecs=tvecs)
 print('*.npz文件输出完毕')
