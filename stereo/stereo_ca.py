@@ -1,174 +1,130 @@
-import numpy as np
 import cv2
+import numpy as np
+import glob
+import os
 
-# 双目相机参数
-class stereoCamera(object):
-    def __init__(self):
-        # 左相机内参
-        self.cam_matrix_left = np.array([[1393.22172200895, -0.995545249279859, 955.251005896264],
-                                         [0., 1393.64853177193, 533.727854721113],
-                                         [0., 0., 1.]])
-        # 右相机内参
-        self.cam_matrix_right = np.array([[1392.85086761789, -1.11152594052554, 941.378478650626],
-                                          [0., 1392.25346501003, 530.138196689747],
-                                          [0., 0., 1.]])
 
-        # 左右相机畸变系数：[k1, k2, p1, p2, k3]
-        self.distortion_l = np.array([[-0.167488181403578, 0.0436281136481580, -0.000295923284238189,
-                                       -0.000557640732845627, -0.0447389245250197]])
-        self.distortion_r = np.array([[-0.161597381187758, -0.0465705385781368, -0.000445502199937932,
-                                       -0.000169101110520959, 0.332776709145332]])
+def tstR(imagesPath):
+    chessboard_size = (11, 8)  # 棋盘格的内角点个数
+    square_size = 3.0  # 棋盘格每个方格的实际大小，单位可以是毫米、厘米或米
 
-        # 旋转矩阵
-        self.R = np.array([[0.999962944723466,	0.00111956709473645,	0.00853555794866957],
-                            [-0.00111382087540575,	0.999999149904264,	-0.000677933483298141],
-                            [-0.00853630968464847,	0.000668401279658990,	0.999963341656432]])
+    # 准备棋盘格的世界坐标系坐标（假设z=0）
+    objp = np.zeros((chessboard_size[0] * chessboard_size[1], 3), np.float32)
+    objp[:, :2] = np.mgrid[0:chessboard_size[0], 0:chessboard_size[1]].T.reshape(-1, 2)
+    objp *= square_size
 
-        # 平移矩阵
-        self.T = np.array([[-119.940339973533],	[0.0555434402027440],	[0.721611626472863]])
+    # 用于存储所有图像的世界坐标系点和图像坐标系点
+    objpoints = []  # 世界坐标系中的点
+    imgpoints = []  # 图像坐标系中的点
 
-        # 主点列坐标的差
-        self.doffs = 0.0
+    # 获取所有棋盘格图像的路径
+    images = imagesPath
 
-        # 指示上述内外参是否为经过立体校正后的结果
-        self.isRectified = False
+    for image_path in images:
+        img = cv2.imread(image_path)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-# 获取畸变校正和立体校正的映射变换矩阵、重投影矩阵
-def getRectifyTransform(height, width, config):
-    left_K = config.cam_matrix_left
-    right_K = config.cam_matrix_right
-    left_distortion = config.distortion_l
-    right_distortion = config.distortion_r
-    R = config.R
-    T = config.T
+        # 检测棋盘格角点
+        ret, corners = cv2.findChessboardCorners(gray, chessboard_size, None)
 
-    height = int(height)
-    width = int(width)
-    R1, R2, P1, P2, Q, roi1, roi2 = cv2.stereoRectify(left_K, left_distortion, right_K, right_distortion,
-                                                      (width, height), R, T, alpha=0)
+        if ret:
+            objpoints.append(objp)
+            imgpoints.append(corners)
 
-    map1x, map1y = cv2.initUndistortRectifyMap(left_K, left_distortion, R1, P1, (width, height), cv2.CV_32FC1)
-    map2x, map2y = cv2.initUndistortRectifyMap(right_K, right_distortion, R2, P2, (width, height), cv2.CV_32FC1)
+    # 执行相机标定
+    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], None, None)
 
-    return map1x, map1y, map2x, map2y, Q
+    # 将旋转向量转换为旋转矩阵
+    rvec_matrix = cv2.Rodrigues(rvecs[0])[0]  # 只取第一个图像的旋转矩阵
 
-# 畸变校正和立体校正
-def rectifyImage(image1, image2, map1x, map1y, map2x, map2y):
-    rectifyed_img1 = cv2.remap(image1, map1x, map1y, cv2.INTER_AREA)
-    rectifyed_img2 = cv2.remap(image2, map2x, map2y, cv2.INTER_AREA)
-    return rectifyed_img1, rectifyed_img2
+    # 返回相机内参、畸变系数和旋转矩阵
+    return mtx, dist, rvec_matrix
 
-# 立体校正检验----画线
+
 def draw_line(image1, image2):
+    # 建立输出图像
     height = max(image1.shape[0], image2.shape[0])
     width = image1.shape[1] + image2.shape[1]
-    output = np.zeros((height, width, 3), dtype=np.uint8)
+
+    output = np.zeros((height, width), dtype=np.uint8)
     output[0:image1.shape[0], 0:image1.shape[1]] = image1
     output[0:image2.shape[0], image1.shape[1]:] = image2
 
-    line_interval = 150
+    # 绘制等间距平行线
+    line_interval = 50  # 直线间隔：50
     for k in range(height // line_interval):
         cv2.line(output, (0, line_interval * (k + 1)), (2 * width, line_interval * (k + 1)), (0, 255, 0), thickness=2,
                  lineType=cv2.LINE_AA)
+
     return output
 
-# 视差计算
-def stereoMatchSGBM(left_image, right_image, down_scale=False):
-    img_channels = 1 if left_image.ndim == 2 else 3
-    blockSize = 3
-    paraml = {'minDisparity': 0,
-              'numDisparities': 128,
-              'blockSize': blockSize,
-              'P1': 8 * img_channels * blockSize ** 2,
-              'P2': 32 * img_channels * blockSize ** 2,
-              'disp12MaxDiff': 1,
-              'preFilterCap': 63,
-              'uniquenessRatio': 15,
-              'speckleWindowSize': 100,
-              'speckleRange': 1,
-              'mode': cv2.STEREO_SGBM_MODE_SGBM_3WAY
-              }
+# 创建result文件夹（如果不存在）
+if not os.path.exists('result'):
+    os.makedirs('result')
 
-    left_matcher = cv2.StereoSGBM_create(**paraml)
-    paramr = paraml
-    paramr['minDisparity'] = -paraml['numDisparities']
-    right_matcher = cv2.StereoSGBM_create(**paramr)
+# 读取左右图像
+left_image = cv2.imread('left.jpg', cv2.IMREAD_GRAYSCALE)
+right_image = cv2.imread('right.jpg', cv2.IMREAD_GRAYSCALE)
 
-    size = (left_image.shape[1], left_image.shape[0])
-    if down_scale == False:
-        disparity_left = left_matcher.compute(left_image, right_image)
-        disparity_right = right_matcher.compute(right_image, left_image)
-    else:
-        left_image_down = cv2.pyrDown(left_image)
-        right_image_down = cv2.pyrDown(right_image)
-        factor = left_image.shape[1] / left_image_down.shape[1]
+# 获取左右相机图片路径
+left_Path = glob.glob('left/*.bmp')
+right_Path = glob.glob('right/*.bmp')
 
-        disparity_left_half = left_matcher.compute(left_image_down, right_image_down)
-        disparity_right_half = right_matcher.compute(right_image_down, left_image_down)
-        disparity_left = cv2.resize(disparity_left_half, size, interpolation=cv2.INTER_AREA)
-        disparity_right = cv2.resize(disparity_right_half, size, interpolation=cv2.INTER_AREA)
-        disparity_left = factor * disparity_left
-        disparity_right = factor * disparity_right
+# 相机内参
+K1, D1, R1 = tstR(left_Path)
+K2, D2, R2 = tstR(right_Path)
 
-    trueDisp_left = disparity_left.astype(np.float32) / 16.
-    trueDisp_right = disparity_right.astype(np.float32) / 16.
-    return trueDisp_left, trueDisp_right
+# 计算旋转矩阵和平移向量
+R1_i = np.linalg.inv(R1)  # 现在R1是3x3的旋转矩阵，可以求逆
+R = R2.dot(R1_i)
+baseline = 12.0
+T = np.array([-12, 0.0, 0.0], dtype=np.float64)  # 平移向量
 
-# 根据公式计算深度图
-def getDepthMapWithConfig(disparityMap, config):
-    fb = config.cam_matrix_left[0, 0] * (-config.T[0])
-    doffs = config.doffs
-    depthMap = np.divide(fb, disparityMap + doffs)
-    reset_index = np.where(np.logical_or(depthMap < 0.0, depthMap > 65535.0))
-    depthMap[reset_index] = 0
-    reset_index2 = np.where(disparityMap < 0.0)
-    depthMap[reset_index2] = 0
-    return depthMap.astype(np.float32)
+print("旋转矩阵 R:\n", R)
+print("平移向量 T:\n", T)
 
+# 焦距
+f_x = K1[0, 0]
 
-def normalize_depth_map(depthMap):
-    # 排除无效的深度值（通常为0）来计算有效范围的最小值和最大值
-    valid_depths = depthMap[depthMap > 0]
-    min_depth = np.min(valid_depths)
-    max_depth = np.max(valid_depths)
+# 图像尺寸
+h1, w1 = left_image.shape[:2]
+h2, w2 = right_image.shape[:2]
 
-    # 归一化到0到1的范围
-    normalized_depth_map = (depthMap - min_depth) / (max_depth - min_depth)
+# 立体校正
+R1, R2, P1, P2, Q, roi1, roi2 = cv2.stereoRectify(K1, D1, K2, D2, (w1, h1), R, T, alpha=0)
 
-    # 将归一化的深度值缩放到0到255的范围
-    depth_map_255 = (normalized_depth_map * 255).astype(np.uint8)
+# 初始化重映射
+left_map1, left_map2 = cv2.initUndistortRectifyMap(K1, None, R1, P1, (w1, h1), cv2.CV_16SC2)
+right_map1, right_map2 = cv2.initUndistortRectifyMap(K2, None, R2, P2, (w2, h2), cv2.CV_16SC2)
 
-    # 将无效的深度值（0）保持不变
-    depth_map_255[depthMap == 0] = 0
+# 立体校正后的图像
+rectified_left = cv2.remap(left_image, left_map1, left_map2, cv2.INTER_LINEAR)
+rectified_right = cv2.remap(right_image, right_map1, right_map2, cv2.INTER_LINEAR)
 
-    return depth_map_255
+# 绘制校正对比线
+line = draw_line(left_image, rectified_left)
+cv2.imwrite('result/AAA.png', line)
 
-if __name__ == "__main__":
-    # 加载图像
-    left_image = cv2.imread('left.jpg')
-    right_image = cv2.imread('right.jpg')
+cv2.imwrite('result/left_rectified.png', rectified_left)
+cv2.imwrite('result/right_rectified.png', rectified_right)
 
-    # 设置相机参数
-    stereo_camera = stereoCamera()
+# 计算视差图
+stereo = cv2.StereoSGBM_create(minDisparity=0, numDisparities=64, blockSize=5)
+disparity = stereo.compute(rectified_left, rectified_right)
 
-    # 获取映射变换矩阵
-    height, width = left_image.shape[:2]
-    map1x, map1y, map2x, map2y, Q = getRectifyTransform(height, width, stereo_camera)
+# 视差图归一化处理（可视化）
+disparity_norm = cv2.normalize(disparity, None, 0, 255, cv2.NORM_MINMAX)
+disparity_norm = np.uint8(disparity_norm)
 
-    # 畸变校正和立体校正
-    rectified_left, rectified_right = rectifyImage(left_image, right_image, map1x, map1y, map2x, map2y)
+# 保存视差图
+cv2.imwrite('result/disparity.png', disparity_norm)
 
-    # 立体校正检验----画线
-    rectified_images_with_lines = draw_line(rectified_left, rectified_right)
-    cv2.imwrite('rectified_images_with_lines.png', rectified_images_with_lines)
+# 计算深度图
+depth = (f_x * baseline) / (disparity + 1e-6)
 
-    # 计算视差图
-    disparity_left, disparity_right = stereoMatchSGBM(rectified_left, rectified_right)
-    cv2.imwrite('disparity_left.png', disparity_left)
+# 深度图归一化处理（可视化）
+depth_norm = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX)
+depth_norm = np.uint8(depth_norm)
 
-    # 根据公式计算深度图
-    depth_map_formula = getDepthMapWithConfig(disparity_left, stereo_camera)
-    depth_map_formula = normalize_depth_map(depth_map_formula)
-    cv2.imwrite('depth_map_formula.png', depth_map_formula)
-
-    print("Processing complete. Outputs saved as images")
+# 保存深度图
+cv2.imwrite('result/depth.png', depth_norm)

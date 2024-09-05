@@ -1,56 +1,93 @@
 import cv2
 import numpy as np
+import glob
+def tstR(imagesPath):
+    chessboard_size = (11, 8)  # 棋盘格的内角点个数
+    square_size = 3.0  # 棋盘格每个方格的实际大小，单位可以是毫米、厘米或米
 
-# 相机内参矩阵和畸变系数
-intrinsic_matrix_left = np.array([
-    [1393.22172200895, -0.995545249279859, 955.251005896264],
-    [0, 1393.64853177193, 533.727854721113],
-    [0, 0, 1]
-])
-intrinsic_matrix_right = np.array([
-    [1392.85086761789, -1.11152594052554, 941.378478650626],
-    [0, 1392.25346501003, 530.138196689747],
-    [0, 0, 1]
-])
+    # 准备棋盘格的世界坐标系坐标（假设z=0）
+    objp = np.zeros((chessboard_size[0] * chessboard_size[1], 3), np.float32)
+    objp[:, :2] = np.mgrid[0:chessboard_size[0], 0:chessboard_size[1]].T.reshape(-1, 2)
+    objp *= square_size
 
-# 基线长度（单位：毫米）
-baseline = 120  # 单位: 毫米
+    # 用于存储所有图像的世界坐标系点和图像坐标系点
+    objpoints = []  # 世界坐标系中的点
+    imgpoints = []  # 图像坐标系中的点
 
-# 焦距
-f_x_left = intrinsic_matrix_left[0, 0]
-f_y_left = intrinsic_matrix_left[1, 1]
+    # 获取所有棋盘格图像的路径
+    images = imagesPath
 
-f_x_right = intrinsic_matrix_right[0, 0]
-f_y_right = intrinsic_matrix_right[1, 1]
+    for image_path in images:
+        img = cv2.imread(image_path)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-# 读取图像
-img_left = cv2.imread('left_1.png')
-img_right = cv2.imread('right_1.png')
+        # 检测棋盘格角点
+        ret, corners = cv2.findChessboardCorners(gray, chessboard_size, None)
 
-# 棋盘格参数
-pattern_size = (12,9)  # 棋盘格内角点的数量（列数，行数）
+        if ret:
+            objpoints.append(objp)
+            imgpoints.append(corners)
 
-# 棋盘格角点检测
-ret_left, corners_left = cv2.findChessboardCorners(img_left, pattern_size)
-ret_right, corners_right = cv2.findChessboardCorners(img_right, pattern_size)
+    # 执行相机标定
+    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], None, None)
+
+    # 将旋转向量转换为旋转矩阵
+    rvec_matrix = cv2.Rodrigues(rvecs[0])[0]  # 只取第一个图像的旋转矩阵
+
+    # 返回相机内参、畸变系数和旋转矩阵
+    return mtx, dist, rvec_matrix
+
+# 读取左右图像
+left_image = cv2.imread('left.jpg', cv2.IMREAD_GRAYSCALE)
+right_image = cv2.imread('right.jpg', cv2.IMREAD_GRAYSCALE)
+
+# 获取左右相机图片路径
+left_Path = glob.glob('left/*.bmp')
+right_Path = glob.glob('right/*.bmp')
+
+# 相机内参
+K1, D1, R1 = tstR(left_Path)
+K2, D2, R2 = tstR(right_Path)
+# 计算旋转矩阵和平移向量
+R1_i = np.linalg.inv(R1)  # 现在R1是3x3的旋转矩阵，可以求逆
+R = R2.dot(R1_i)
+baseline = 12.0
+T = np.array([baseline]).reshape(-1, 1)
+# 读取左右相机的图像
+img_left = cv2.imread('left/1.bmp')
+img_right = cv2.imread('right/1.bmp')
+# 转为灰度图
+gray_left = cv2.cvtColor(img_left, cv2.COLOR_BGR2GRAY)
+gray_right = cv2.cvtColor(img_right, cv2.COLOR_BGR2GRAY)
+
+# 棋盘格的尺寸 (内角点数量)
+pattern_size = (12, 9)
+
+# 查找棋盘格的角点
+ret_left, corners_left = cv2.findChessboardCorners(gray_left, pattern_size, None)
+ret_right, corners_right = cv2.findChessboardCorners(gray_right, pattern_size, None)
 
 if ret_left and ret_right:
-    # 角点坐标转换为浮点数
-    corners_left = np.float32(corners_left)
-    corners_right = np.float32(corners_right)
+    # 优化角点位置（亚像素精度）
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+    corners_left = cv2.cornerSubPix(gray_left, corners_left, (11, 11), (-1, -1), criteria)
+    corners_right = cv2.cornerSubPix(gray_right, corners_right, (11, 11), (-1, -1), criteria)
 
-    # 计算视差
-    disparity = np.abs(corners_left[:, :, 0] - corners_right[:, :, 0])
+    # 去畸变
+    corners_left_undist = cv2.undistortPoints(corners_left, K1, D1)
+    corners_right_undist = cv2.undistortPoints(corners_right, K2, D2)
 
-    # 计算深度
-    Z = (f_x_left * baseline) / disparity
+    # 构造投影矩阵
+    P1 = np.hstack((K1, np.zeros((3, 1))))  # 左相机投影矩阵 [K1|0]
+    P2 = np.hstack((K2, np.dot(K2, np.hstack((R, T.reshape(-1, 1))))))  # 右相机投影矩阵 [K2|R|T]
 
-    # 计算三维坐标
-    X = (corners_left[:, :, 0] - intrinsic_matrix_left[0, 2]) * Z / f_x_left
-    Y = (corners_left[:, :, 1] - intrinsic_matrix_left[1, 2]) * Z / f_y_left
+    # 使用角点进行三角测量
+    points_4D = cv2.triangulatePoints(P1, P2, corners_left_undist.T, corners_right_undist.T)
 
-    # 显示结果
-    for i in range(len(X)):
-        print(f'Corner {i}: X = {X[i][0]}, Y = {Y[i][0]}, Z = {Z[i][0]}')
+    # 将齐次坐标转换为 3D 点
+    points_3D = points_4D[:3, :] / points_4D[3, :]
+
+    # 输出 3D 点
+    print("3D Points: \n", points_3D.T)
 else:
-    print("无法检测到棋盘格角点")
+    print("未能检测到棋盘格角点")
