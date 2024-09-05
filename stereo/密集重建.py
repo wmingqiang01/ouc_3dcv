@@ -1,97 +1,139 @@
 import cv2
 import numpy as np
+import glob
+import os
 
-# 加载图像
-left_image = cv2.imread('left.jpg', cv2.IMREAD_GRAYSCALE)
-right_image = cv2.imread('right.jpg', cv2.IMREAD_GRAYSCALE)
+# Step 1: Camera Calibration
+pattern_size = (11, 8)  # 内角点数量
+square_size = 30  # 单元格边长，单位为mm
 
-# 定义相机内参矩阵
-K_left = np.array([[1393.22172200895, -0.995545249279859, 955.251005896264],
-                    [0., 1393.64853177193, 533.727854721113],
-                    [0., 0., 1.]])
+# 准备棋盘格的3D点（世界坐标系中的坐标）
+objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)
+objp[:, :2] = np.mgrid[0:pattern_size[0], 0:pattern_size[1]].T.reshape(-1, 2) * square_size
 
-K_right = np.array([[1392.85086761789, -1.11152594052554, 941.378478650626],
-                    [0., 1392.25346501003, 530.138196689747],
-                    [0., 0., 1.]])
+# 存储所有的3D点（世界坐标系）和2D点（图像坐标系）
+objpoints = []  # 3D点
+imgpoints_left = []  # 左目图像的2D点
+imgpoints_right = []  # 右目图像的2D点
 
-# 使用ORB特征检测和匹配
-orb = cv2.ORB_create()
-keypoints_left, descriptors_left = orb.detectAndCompute(left_image, None)
-keypoints_right, descriptors_right = orb.detectAndCompute(right_image, None)
+# 读取左目和右目图像路径
+left_image_path = r'D:\Desktop\双目数据\深度估计\left'
+right_image_path = r'D:\Desktop\双目数据\标定\right'
+left_images = sorted(glob.glob(left_image_path + '\*.bmp'))
+right_images = sorted(glob.glob(right_image_path + '\*.bmp'))
 
-# 使用BFMatcher进行特征点匹配
-bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-matches = bf.match(descriptors_left, descriptors_right)
-matches = sorted(matches, key=lambda x: x.distance)
+# 遍历所有图像，查找棋盘格角点
+for left_img_path, right_img_path in zip(left_images, right_images):
+    img_left = cv2.imread(left_img_path)
+    img_right = cv2.imread(right_img_path)
+    gray_left = cv2.cvtColor(img_left, cv2.COLOR_BGR2GRAY)
+    gray_right = cv2.cvtColor(img_right, cv2.COLOR_BGR2GRAY)
 
-# 提取匹配的点
-pts_left = np.float32([keypoints_left[m.queryIdx].pt for m in matches])
-pts_right = np.float32([keypoints_right[m.trainIdx].pt for m in matches])
+    # 查找棋盘格角点
+    ret_left, corners_left = cv2.findChessboardCorners(gray_left, pattern_size, None)
+    ret_right, corners_right = cv2.findChessboardCorners(gray_right, pattern_size, None)
 
-# 计算基本矩阵 F
-F, mask = cv2.findFundamentalMat(pts_left, pts_right, cv2.FM_RANSAC)
+    # 如果找到足够的角点，添加到点列表中
+    if ret_left and ret_right:
+        objpoints.append(objp)
+        imgpoints_left.append(corners_left)
+        imgpoints_right.append(corners_right)
 
-# 计算矫正变换
-h1, w1 = left_image.shape[:2]
-h2, w2 = right_image.shape[:2]
+cv2.destroyAllWindows()
 
-_, H1, H2 = cv2.stereoRectifyUncalibrated(pts_left, pts_right, F, imgSize=(w1, h1))
+# 左目相机标定
+ret_left, camera_matrix_left, dist_coeffs_left, rvecs_left, tvecs_left = cv2.calibrateCamera(
+    objpoints, imgpoints_left, gray_left.shape[::-1], None, None)
 
-# 应用几何变换以矫正图像
-left_rectified = cv2.warpPerspective(left_image, H1, (w1, h1))
-right_rectified = cv2.warpPerspective(right_image, H2, (w2, h2))
+# 右目相机标定
+ret_right, camera_matrix_right, dist_coeffs_right, rvecs_right, tvecs_right = cv2.calibrateCamera(
+    objpoints, imgpoints_right, gray_right.shape[::-1], None, None)
 
-# 保存矫正后的图像
-cv2.imwrite('left_rectified.png', left_rectified)
-cv2.imwrite('right_rectified.png', right_rectified)
+# 立体矫正
+flags = cv2.CALIB_FIX_INTRINSIC
+criteria_stereo = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
+ret_stereo, _, _, _, _, R, T, E, F = cv2.stereoCalibrate(
+    objpoints, imgpoints_left, imgpoints_right,
+    camera_matrix_left, dist_coeffs_left,
+    camera_matrix_right, dist_coeffs_right,
+    gray_left.shape[::-1], criteria=criteria_stereo, flags=flags
+)
 
-# 创建SGBM对象用于计算视差图
+# 立体矫正
+R1, R2, P1, P2, Q, roi1, roi2 = cv2.stereoRectify(
+    camera_matrix_left, dist_coeffs_left,
+    camera_matrix_right, dist_coeffs_right,
+    gray_left.shape[::-1], R, T, alpha=0
+)
+
+# 计算去畸变和矫正的映射
+map1_left, map2_left = cv2.initUndistortRectifyMap(
+    camera_matrix_left, dist_coeffs_left, R1, P1, gray_left.shape[::-1], cv2.CV_16SC2)
+map1_right, map2_right = cv2.initUndistortRectifyMap(
+    camera_matrix_right, dist_coeffs_right, R2, P2, gray_right.shape[::-1], cv2.CV_16SC2)
+
+# 读取需要进行深度估计的图像
+left_image_for_depth = 'left.jpg'
+right_image_for_depth = 'right.jpg'
+img_left = cv2.imread(left_image_for_depth, cv2.IMREAD_GRAYSCALE)
+img_right = cv2.imread(right_image_for_depth, cv2.IMREAD_GRAYSCALE)
+
+# 图像矫正
+rectified_img_left = cv2.remap(img_left, map1_left, map2_left, cv2.INTER_LINEAR)
+rectified_img_right = cv2.remap(img_right, map1_right, map2_right, cv2.INTER_LINEAR)
+
+# Step 3: Dense Matching and 3D Reconstruction
+# 创建SGBM匹配器
 window_size = 5
-min_disp = 0  # 最小视差
-num_disp = 128  # 视差范围
-
-stereo = cv2.StereoSGBM_create(minDisparity=min_disp,
-                               numDisparities=num_disp,
-                               blockSize=window_size,
-                               P1=8 * 3 * window_size**2,
-                               P2=32 * 3 * window_size**2,
-                               disp12MaxDiff=1,
-                               uniquenessRatio=10,
-                               speckleWindowSize=100,
-                               speckleRange=32,
-                               preFilterCap=63)
+min_disp = 0
+num_disp = 16 * 5  # 必须是16的倍数
+stereo = cv2.StereoSGBM_create(
+    minDisparity=min_disp,
+    numDisparities=num_disp,
+    blockSize=window_size,
+    P1=8 * 3 * window_size ** 2,
+    P2=32 * 3 * window_size ** 2,
+    disp12MaxDiff=1,
+    uniquenessRatio=10,
+    speckleWindowSize=100,
+    speckleRange=32
+)
 
 # 计算视差图
-disparity_map = stereo.compute(left_rectified, right_rectified).astype(np.float32) / 16.0
+disparity = stereo.compute(rectified_img_left, rectified_img_right).astype(np.float32) / 16.0
 
-# 过滤掉负值和极小值
-disparity_map[disparity_map < 0] = 0
+# 保存视差图
+cv2.imwrite('disparity_1.png', disparity)
 
-# 显示或保存视差图
-cv2.imshow('Disparity Map', disparity_map)
-cv2.imwrite('disparity_map.png', disparity_map)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+# 三维重建
+points_3D = cv2.reprojectImageTo3D(disparity, Q)
 
-# 检查视差图的最小值和最大值
-print("Disparity Map min:", np.min(disparity_map))
-print("Disparity Map max:", np.max(disparity_map))
+# 可视化和保存3D点云
+mask = disparity > disparity.min()  # 创建掩膜，仅保留有效的视差点
+points = points_3D[mask]  # 筛选有效的3D点
 
-# 将视差图转换为深度图
-focal_length = K_left[0, 0]  # 使用左目相机的焦距
-baseline = 120.0  # 基线长度为120mm
+# 使用颜色保存点云（可选）
+colors = cv2.imread(left_image_for_depth)  # 从左目图像获取颜色信息
+colors = colors[mask]
 
-# 避免除以零
-depth_map = np.zeros(disparity_map.shape)
-valid_disp = disparity_map > 0
-depth_map[valid_disp] = (focal_length * baseline) / disparity_map[valid_disp]
+# 创建输出文件夹
+output_folder = r'F:\abc\pointcloud'
+os.makedirs(output_folder, exist_ok=True)
 
-# 对深度图进行归一化处理，使其值范围在0到255之间
-depth_map_normalized = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX)
-depth_map_normalized = np.uint8(depth_map_normalized)
+# 保存为PLY文件（可视化3D点云）
+output_path = os.path.join(output_folder, 'cloud_1.ply')
+with open(output_path, 'w') as f:
+    f.write('ply\n')
+    f.write('format ascii 1.0\n')
+    f.write(f'element vertex {len(points)}\n')
+    f.write('property float x\n')
+    f.write('property float y\n')
+    f.write('property float z\n')
+    f.write('property uchar red\n')
+    f.write('property uchar green\n')
+    f.write('property uchar blue\n')
+    f.write('end_header\n')
+    for p, c in zip(points, colors):
+        f.write(f'{p[0]} {p[1]} {p[2]} {c[2]} {c[1]} {c[0]}\n')  # PLY文件使用RGB格式
 
-# 可视化或保存归一化后的深度图
-cv2.imshow('Normalized Depth Map', depth_map_normalized)
-cv2.imwrite('normalized_depth_map.png', depth_map_normalized)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+print("深度估计和3D点云生成完成！")

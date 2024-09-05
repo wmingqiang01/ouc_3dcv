@@ -164,6 +164,7 @@ if __name__ == "__main__":
 
     # 计算视差图
     disparity_left, disparity_right = stereoMatchSGBM(rectified_left, rectified_right)
+    cv2.imwrite('disparity_left.png', disparity_left)
 
     # 根据公式计算深度图
     depth_map_formula = getDepthMapWithConfig(disparity_left, stereo_camera)
