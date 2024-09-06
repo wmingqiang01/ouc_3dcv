@@ -109,7 +109,18 @@ cv2.imwrite('result/left_rectified.png', rectified_left)
 cv2.imwrite('result/right_rectified.png', rectified_right)
 
 # 计算视差图
-stereo = cv2.StereoSGBM_create(minDisparity=0, numDisparities=64, blockSize=5)
+stereo = cv2.StereoSGBM_create(
+    minDisparity=32,
+    numDisparities=192-32,
+    blockSize=3,
+    P1=500,  # 对于灰度图像和blockSize=5
+    P2=2000,
+    preFilterCap=31,
+    uniquenessRatio=5,
+    speckleWindowSize=0,
+    speckleRange=1,
+    disp12MaxDiff=20
+)
 disparity = stereo.compute(rectified_left, rectified_right)
 
 # 视差图归一化处理（可视化）
